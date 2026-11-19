@@ -5,6 +5,7 @@ Defines endpoints for file uploads and initial structural validation.
 
 from fastapi import APIRouter, File, UploadFile, HTTPException, status
 from app.data_engine.loader import load_csv
+from app.data_engine.storage import save_dataset, read_upload_file_safely
 
 # Create an isolated router for upload-related operations
 router = APIRouter(tags=["Upload"])
@@ -30,18 +31,16 @@ async def upload_csv_file(file: UploadFile = File(...)):
             detail="Invalid file type. Only CSV files (.csv) are supported."
         )
 
-    # 3. Read file contents into memory
-    try:
-        contents = await file.read()
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to read uploaded file: {str(e)}"
-        )
+    # 3. Read file contents safely with upload size enforcement
+    contents = await read_upload_file_safely(file)
 
     # 4. Process and parse CSV using data_engine.loader
     try:
         dataset_info = load_csv(file_bytes=contents, filename=file.filename)
+        # Preserve dataset in temporary server-side storage for subsequent analysis
+        dataset_id = save_dataset(file_bytes=contents, filename=file.filename)
+        dataset_info["dataset_id"] = dataset_id
+
         return {
             "status": "success",
             "message": "CSV file successfully processed.",
