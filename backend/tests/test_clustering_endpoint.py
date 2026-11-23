@@ -44,6 +44,12 @@ def test_cluster_successful_direct_upload():
     assert data["n_clusters"] == 3
     assert data["total_rows"] == 45
     assert len(data["cluster_assignments"]) == 45
+    preview = data["visualization_data"]
+    assert preview["total_rows"] == 45
+    assert preview["returned_rows"] == 45
+    assert len(preview["rows"]) == 45
+    for row in preview["rows"]:
+        assert row["cluster"] == data["cluster_assignments"][row["row_index"]]
     assert len(data["cluster_sizes"]) == 3
     assert len(data["centroids"]) == 3
     assert data["inertia"] is not None

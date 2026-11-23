@@ -4,11 +4,12 @@ API tests for the Data Cleaning and Download endpoints (backend/app/routes/clean
 
 import io
 import json
+import time
 import pytest
 import pandas as pd
 from fastapi.testclient import TestClient
 from app.main import app
-from app.data_engine.storage import get_dataset
+from app.data_engine.storage import get_dataset, get_storage_dir, save_dataset
 
 client = TestClient(app)
 
@@ -130,6 +131,75 @@ def test_clean_download_endpoint():
     assert download_query_res.content == download_res.content
 
 
+def test_clean_preview_returns_cleaned_values_first_twenty_rows_and_dimensions():
+    csv_content = b"id,category\n" + b"".join(
+        f"{row},source\n".encode("utf-8") for row in range(25)
+    )
+    response = client.post(
+        "/clean",
+        files={"file": ("preview.csv", csv_content, "text/csv")},
+        data={
+            "operations": json.dumps({
+                "value_mapping": {"category": {"source": "cleaned"}},
+            })
+        },
+    )
+    assert response.status_code == 200
+    result = response.json()
+
+    preview_response = client.get(f"/clean/preview/{result['cleaned_dataset_id']}")
+    assert preview_response.status_code == 200
+    preview = preview_response.json()
+    assert preview["columns"] == ["id", "category"]
+    assert preview["rows"][0] == [0, "cleaned"]
+    assert len(preview["rows"]) == 20
+    assert preview["total_rows"] == 25
+    assert preview["total_columns"] == 2
+    original_bytes, _ = get_dataset(result["original_dataset_id"])
+    assert original_bytes == csv_content
+
+
+@pytest.mark.parametrize(
+    ("csv_content", "expected_columns"),
+    [(b"value,id\n", ["value", "id"]), (b"", [])],
+)
+def test_clean_preview_handles_empty_datasets(csv_content, expected_columns):
+    dataset_id = save_dataset(csv_content, "empty.csv")
+
+    response = client.get(f"/clean/preview/{dataset_id}")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "dataset_id": dataset_id,
+        "columns": expected_columns,
+        "rows": [],
+        "total_rows": 0,
+        "total_columns": len(expected_columns),
+    }
+
+
+def test_clean_preview_rejects_invalid_missing_and_expired_dataset_ids():
+    invalid_response = client.get("/clean/preview/not-a-uuid")
+    assert invalid_response.status_code == 400
+    assert "Invalid dataset_id format" in invalid_response.json()["detail"]
+
+    missing_response = client.get(
+        "/clean/preview/33333333-4444-5555-6666-777777777777"
+    )
+    assert missing_response.status_code == 404
+    assert "not found" in missing_response.json()["detail"].lower()
+
+    expired_id = save_dataset(b"value\n1\n", "expired.csv")
+    metadata_path = get_storage_dir() / f"{expired_id}.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["created_at"] = time.time() - (49 * 3600)
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    expired_response = client.get(f"/clean/preview/{expired_id}")
+    assert expired_response.status_code == 404
+    assert "expired" in expired_response.json()["detail"].lower()
+
+
 # 5. Original dataset remains unchanged after cleaning
 def test_original_dataset_remains_unchanged():
     """Verify original dataset stored bytes are strictly preserved after cleaning."""
@@ -235,3 +305,138 @@ def test_clean_json_serialization():
     assert isinstance(dumped, str)
     reloaded = json.loads(dumped)
     assert reloaded["status"] == "success"
+
+
+# 13. Clean endpoint with invalid_numerical_values and value_mapping
+def test_clean_endpoint_invalid_numerical_and_value_mapping():
+    """Verify endpoint accepts invalid_numerical_values and value_mapping."""
+    csv_content = (
+        b"country,score\n"
+        b"india,10.0\n"
+        b"Indai,-5.0\n"
+        b"INDIA,20.0\n"
+    )
+    operations = {
+        "value_mapping": {
+            "country": {
+                "india": "India",
+                "Indai": "India",
+                "INDIA": "India",
+            }
+        },
+        "invalid_numerical_values": {
+            "score": {
+                "action": "replace_with_nan",
+                "min_value": 0.0,
+            }
+        },
+        "missing_values": {
+            "score": "mean",
+        }
+    }
+    response = client.post(
+        "/clean",
+        files={"file": ("survey.csv", csv_content, "text/csv")},
+        data={"operations": json.dumps(operations)},
+    )
+    assert response.status_code == 200
+    res = response.json()
+    assert res["status"] == "success"
+    report = res["data"]
+    assert report["value_mapping"]["total_mapped"] == 3
+    assert report["invalid_numerical_values"]["total_values_replaced"] == 1
+    # -5.0 replaced with NaN, then mean of 10 and 20 (15.0) imputed
+    assert report["missing_values_imputed"]["total_imputed"] == 1
+
+
+def test_clean_endpoint_maps_categorical_variants_after_trimming_and_preserves_original():
+    original_csv = (
+        b"team\n"
+        b"hr\n"
+        b"HR\n"
+        b"HR\n"
+        b"engineering\n"
+        b"Engineering\n"
+        b"SALES\n"
+        b"Sales\n"
+        b"Finance\n"
+        b" mIxEd \n"
+        b"MIXED\n"
+    )
+    upload_response = client.post(
+        "/upload",
+        files={"file": ("teams.csv", original_csv, "text/csv")},
+    )
+    dataset_id = upload_response.json()["data"]["dataset_id"]
+    response = client.post(
+        f"/clean?dataset_id={dataset_id}",
+        json={
+            "operations": {
+                "trim_whitespace": True,
+                "value_mapping": {
+                    "team": {
+                        "hr": "HR",
+                        "HR": "HR",
+                        "engineering": "Engineering",
+                        "Engineering": "Engineering",
+                        "SALES": "Sales",
+                        "Sales": "Sales",
+                        " mIxEd ": "Mixed",
+                        "MIXED": "Mixed",
+                    }
+                },
+            }
+        },
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    cleaned_response = client.get(result["download_url"])
+    cleaned = pd.read_csv(io.BytesIO(cleaned_response.content))
+    assert cleaned["team"].tolist() == [
+        "HR",
+        "HR",
+        "HR",
+        "Engineering",
+        "Engineering",
+        "Sales",
+        "Sales",
+        "Finance",
+        "Mixed",
+        "Mixed",
+    ]
+    assert result["data"]["value_mapping"]["total_mapped"] == 9
+    stored_original, _ = get_dataset(dataset_id)
+    assert stored_original == original_csv
+
+
+def test_clean_endpoint_applies_infinity_replacement_and_preserves_original():
+    original_csv = b"value\ninf\n-inf\n2\n4\n"
+    upload_response = client.post(
+        "/upload",
+        files={"file": ("infinities.csv", original_csv, "text/csv")},
+    )
+    dataset_id = upload_response.json()["data"]["dataset_id"]
+
+    response = client.post(
+        f"/clean?dataset_id={dataset_id}",
+        json={
+            "operations": {
+                "invalid_numerical_values": {
+                    "value": {"action": "none", "infinity_strategy": "mean"}
+                }
+            }
+        },
+    )
+    assert response.status_code == 200
+    result = response.json()
+    cleaned_csv = client.get(result["download_url"])
+    cleaned = pd.read_csv(io.BytesIO(cleaned_csv.content))
+
+    assert cleaned["value"].tolist() == [3.0, 3.0, 2.0, 4.0]
+    details = result["data"]["invalid_numerical_values"]["details"][0]
+    assert details["infinity_strategy"] == "mean"
+    assert details["infinity_replacement_value"] == 3.0
+    stored_original, _ = get_dataset(dataset_id)
+    assert stored_original == original_csv
+

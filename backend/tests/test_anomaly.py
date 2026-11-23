@@ -42,6 +42,84 @@ def test_detect_anomalies_standard():
     assert "not necessarily indicate an error, defect, or fraud" in result["explanation"]
 
 
+def test_visualization_and_flagged_rows_align_with_source_observations():
+    df = pd.DataFrame({
+        "x": [10.0] * 30 + [1000.0, -500.0],
+        "y": [20.0] * 30 + [1000.0, -500.0],
+    })
+    result = detect_anomalies(df, feature_columns=["x", "y"], contamination=0.1)
+
+    preview = result["visualization_data"]
+    assert preview["total_rows"] == len(df)
+    for row in preview["rows"]:
+        source = df.iloc[row["row_index"]]
+        assert row["features"] == {"x": source["x"], "y": source["y"]}
+        assert row["label"] == result["anomaly_labels"][row["row_index"]]
+        assert row["score"] == result["anomaly_scores"][row["row_index"]]
+        assert row["is_anomaly"] == result["is_anomaly"][row["row_index"]]
+
+    flagged = result["flagged_observations"]
+    assert flagged["total_count"] == result["anomaly_count"]
+    assert flagged["returned_count"] == len(flagged["rows"])
+    assert all(row["is_anomaly"] for row in flagged["rows"])
+    assert all(
+        row["features"] == {
+            "x": df.iloc[row["row_index"]]["x"],
+            "y": df.iloc[row["row_index"]]["y"],
+        }
+        for row in flagged["rows"]
+    )
+
+
+def test_visualization_and_flagged_previews_are_bounded():
+    df = pd.DataFrame({
+        "x": np.arange(600, dtype=float),
+        "y": np.arange(600, dtype=float) * 2,
+    })
+    result = detect_anomalies(df, feature_columns=["x", "y"], contamination=0.1)
+
+    assert result["visualization_data"]["returned_rows"] == 500
+    assert result["visualization_data"]["truncated"] is True
+    assert result["flagged_observations"]["returned_count"] <= 100
+
+
+def test_anomaly_observation_features_are_bounded():
+    df = pd.DataFrame({
+        f"feature_{column}": np.arange(60, dtype=float) * (column + 1)
+        for column in range(12)
+    })
+    result = detect_anomalies(
+        df,
+        feature_columns=list(df.columns),
+        contamination=0.1,
+    )
+
+    preview = result["visualization_data"]
+    assert preview["feature_columns"] == list(df.columns[:10])
+    assert preview["omitted_feature_count"] == 2
+    assert all(len(row["features"]) == 10 for row in preview["rows"])
+    assert all(
+        len(row["features"]) == 10
+        for row in result["flagged_observations"]["rows"]
+    )
+
+
+def test_observation_previews_show_original_missing_and_infinite_values_as_null():
+    df = pd.DataFrame({
+        "x": [float(index) for index in range(30)],
+        "y": [float(index * 2) for index in range(30)],
+    })
+    df.loc[2, "x"] = np.nan
+    df.loc[3, "x"] = np.inf
+    result = detect_anomalies(df, feature_columns=["x", "y"], contamination=0.1)
+
+    preview_rows = result["visualization_data"]["rows"]
+    row_by_index = {row["row_index"]: row for row in preview_rows}
+    assert row_by_index[2]["features"]["x"] is None
+    assert row_by_index[3]["features"]["x"] is None
+    assert row_by_index[2]["features"]["y"] == df.iloc[2]["y"]
+
+
 def test_detect_anomalies_automatic_id_exclusion():
     """Verify that ID columns are excluded from automatic feature selection."""
     df = pd.DataFrame({

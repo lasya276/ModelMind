@@ -12,6 +12,7 @@ Features:
 - Fair comparison of all models on the identical evaluation train/test split.
 - Guaranteed immutability of input DataFrame.
 - Strictly JSON-serializable outputs.
+- Bounded, row-aligned actual/predicted test previews for visualization.
 """
 
 from typing import Dict, Any, List, Optional
@@ -27,6 +28,8 @@ from sklearn.linear_model import LinearRegression
 from sklearn.tree import DecisionTreeRegressor
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+
+PREDICTION_PREVIEW_LIMIT = 500
 
 
 def _safe_float(val: Any, decimals: int = 4) -> Optional[float]:
@@ -84,7 +87,8 @@ def train_regression_model(
         random_state: Random state for reproducibility.
 
     Returns:
-        Structured, JSON-serializable regression report.
+        Structured, JSON-serializable regression report. Each model includes
+        at most 500 aligned actual/predicted test rows in predictions_preview.
 
     Raises:
         ValueError: If inputs are invalid, target does not exist, is non-numeric,
@@ -203,9 +207,10 @@ def train_regression_model(
     # -------------------------------------------------------------
     X = work_df[selected_features]
     y = work_df[target_column]
+    row_positions = np.arange(len(work_df))
 
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=test_size, random_state=random_state
+    X_train, X_test, y_train, y_test, _, test_row_positions = train_test_split(
+        X, y, row_positions, test_size=test_size, random_state=random_state
     )
 
     train_rows = int(len(X_train))
@@ -253,6 +258,7 @@ def train_regression_model(
     # -------------------------------------------------------------
     model_evaluations: Dict[str, Any] = {}
     model_comparison_list: List[Dict[str, Any]] = []
+    predictions_preview: Dict[str, Any] = {}
 
     best_model_key = ""
     best_rmse_score = float("inf")
@@ -271,6 +277,18 @@ def train_regression_model(
 
         # Predictions evaluated on the shared test set
         y_pred = pipeline.predict(X_test)
+        preview_count = min(len(y_test), PREDICTION_PREVIEW_LIMIT)
+        predictions_preview[model_key] = {
+            "row_indices": [int(position) for position in test_row_positions[:preview_count]],
+            "actual_values": [float(value) for value in y_test.iloc[:preview_count]],
+            "predicted_values": [
+                float(value) if np.isfinite(value) else None
+                for value in y_pred[:preview_count]
+            ],
+            "total_rows": int(len(y_test)),
+            "returned_rows": int(preview_count),
+            "truncated": len(y_test) > preview_count,
+        }
 
         mae = _safe_float(mean_absolute_error(y_test, y_pred))
         mse = _safe_float(mean_squared_error(y_test, y_pred))
@@ -358,5 +376,6 @@ def train_regression_model(
             ),
         },
         "model_comparison": model_comparison_list,
+        "predictions_preview": predictions_preview,
         "explanation": explanation,
     }

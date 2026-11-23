@@ -275,11 +275,25 @@ def _check_invalid_numerical_values(df: pd.DataFrame) -> Dict[str, Any]:
         total_inf = pos_inf_count + neg_inf_count
 
         if total_inf > 0:
+            finite_values = series[np.isfinite(series)]
+            value_counts = finite_values.value_counts()
+            mode_available = not value_counts.empty and int(value_counts.eq(value_counts.max()).sum()) == 1
+            mode_unavailable_reason = None
+            if not mode_available:
+                mode_unavailable_reason = (
+                    "No finite values are available."
+                    if finite_values.empty
+                    else "The most frequent finite values are tied."
+                )
+
             affected_columns.append({
                 "column": col_str,
                 "positive_infinity_count": pos_inf_count,
                 "negative_infinity_count": neg_inf_count,
                 "total_invalid_count": total_inf,
+                "finite_value_count": int(len(finite_values)),
+                "mode_available": mode_available,
+                "mode_unavailable_reason": mode_unavailable_reason,
                 "severity": "high",
                 "explanation": (
                     f"Column '{col_str}' contains {total_inf} infinite numerical value(s) "

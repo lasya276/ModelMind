@@ -50,6 +50,8 @@ def clean_dataset(
     casing: Optional[Dict[str, str]] = None,
     drop_empty_columns: Union[bool, List[str]] = False,
     drop_constant_columns: Union[bool, List[str]] = False,
+    invalid_numerical_values: Optional[Dict[str, Any]] = None,
+    value_mapping: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """
     Applies user-selected cleaning operations to a copy of the input DataFrame.
@@ -95,6 +97,10 @@ def clean_dataset(
             drop_empty_columns = operations["drop_empty_columns"]
         if "drop_constant_columns" in operations and not drop_constant_columns:
             drop_constant_columns = operations["drop_constant_columns"]
+        if "invalid_numerical_values" in operations and invalid_numerical_values is None:
+            invalid_numerical_values = operations["invalid_numerical_values"]
+        if "value_mapping" in operations and value_mapping is None:
+            value_mapping = operations["value_mapping"]
 
     # 1. Guarantee Immutability: work strictly on a deep copy
     cleaned_df = df.copy(deep=True)
@@ -107,6 +113,11 @@ def clean_dataset(
     total_missing_imputed = 0
     trimmed_whitespace_details: List[Dict[str, Any]] = []
     casing_applied_details: List[Dict[str, Any]] = []
+    value_mapping_details: List[Dict[str, Any]] = []
+    total_values_mapped = 0
+    invalid_numerical_details: List[Dict[str, Any]] = []
+    total_invalid_replaced = 0
+    total_invalid_rows_dropped = 0
     dropped_empty_columns: List[str] = []
     dropped_constant_columns: List[str] = []
 
@@ -196,6 +207,242 @@ def clean_dataset(
                 "target_case": target_case,
                 "affected_rows": count_affected,
                 "description": f"Converted values in column '{col}' to {target_case}case ({count_affected} values updated).",
+            })
+
+    # -------------------------------------------------------------
+    # 3b. Inconsistent Categorical Values: User-Approved Value Mapping
+    # -------------------------------------------------------------
+    if value_mapping:
+        if not isinstance(value_mapping, dict):
+            raise ValueError("value_mapping must be a dictionary mapping column names to mapping dictionaries.")
+
+        _validate_columns_exist(cleaned_df, list(value_mapping.keys()), "value mapping")
+
+        for col, mapping in value_mapping.items():
+            series = cleaned_df[col]
+            source_series = df[col]
+            is_text = (
+                pd.api.types.is_string_dtype(series)
+                or pd.api.types.is_object_dtype(series)
+                or pd.api.types.is_categorical_dtype(series)
+            )
+            if not is_text:
+                raise ValueError(
+                    f"Cannot apply value mapping on non-text column '{col}' with dtype '{series.dtype}'."
+                )
+
+            if not isinstance(mapping, dict):
+                raise ValueError(f"Mapping for column '{col}' must be a dictionary.")
+
+            if not mapping:
+                continue
+
+            source_matches = source_series.isin(list(mapping.keys()))
+            current_matches = series.isin(list(mapping.keys()))
+            affected_count = int((source_matches | current_matches).sum())
+
+            # Match both the original values and any values already changed by trimming or casing.
+            mapped_series = series.replace(mapping)
+            if source_matches.any():
+                source_positions = np.flatnonzero(source_matches.to_numpy())
+                mapped_series.iloc[source_positions] = (
+                    source_series.iloc[source_positions].map(mapping).to_numpy()
+                )
+            cleaned_df[col] = mapped_series
+            total_values_mapped += affected_count
+
+            value_mapping_details.append({
+                "column": col,
+                "mappings": mapping,
+                "affected_count": affected_count,
+            })
+            operations_performed.append({
+                "operation": "value_mapping",
+                "column": col,
+                "affected_rows": affected_count,
+                "description": f"Applied {len(mapping)} value mapping(s) to column '{col}' ({affected_count} values updated).",
+            })
+
+    # -------------------------------------------------------------
+    # 3c. Invalid Numerical Values Handling (Bounds & Infinities)
+    # -------------------------------------------------------------
+    if invalid_numerical_values:
+        if not isinstance(invalid_numerical_values, dict):
+            raise ValueError("invalid_numerical_values must be a dictionary mapping column names to configuration.")
+
+        _validate_columns_exist(cleaned_df, list(invalid_numerical_values.keys()), "invalid numerical values")
+
+        rows_to_drop_mask = pd.Series(False, index=cleaned_df.index)
+
+        for col, cfg in invalid_numerical_values.items():
+            series = cleaned_df[col].copy()
+            is_numeric = pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(series)
+            if not is_numeric:
+                raise ValueError(
+                    f"Cannot configure invalid numerical values on non-numeric column '{col}' with dtype '{series.dtype}'."
+                )
+
+            if isinstance(cfg, str):
+                cfg = {"action": cfg}
+            elif not isinstance(cfg, dict):
+                raise ValueError(f"Configuration for column '{col}' must be a dictionary or action string.")
+
+            action = str(cfg.get("action", "replace_with_nan")).lower().strip()
+            if action not in ("replace_with_nan", "replace_with_null", "drop_rows", "none"):
+                raise ValueError(
+                    f"Invalid action '{action}' for column '{col}'. "
+                    "Supported actions are: 'replace_with_nan', 'replace_with_null', 'drop_rows', 'none'."
+                )
+
+            min_val = cfg.get("min_value")
+            max_val = cfg.get("max_value")
+
+            if min_val is not None:
+                try:
+                    min_val = float(min_val)
+                except (TypeError, ValueError):
+                    raise ValueError(f"Invalid min_value '{cfg.get('min_value')}' for column '{col}'. Must be a number.")
+
+            if max_val is not None:
+                try:
+                    max_val = float(max_val)
+                except (TypeError, ValueError):
+                    raise ValueError(f"Invalid max_value '{cfg.get('max_value')}' for column '{col}'. Must be a number.")
+
+            if min_val is not None and max_val is not None and min_val > max_val:
+                raise ValueError(
+                    f"min_value ({min_val}) cannot be greater than max_value ({max_val}) for column '{col}'."
+                )
+
+            handle_infinities = bool(cfg.get("handle_infinities", True))
+            has_infinity_strategy = "infinity_strategy" in cfg
+            infinity_strategy = str(cfg.get("infinity_strategy", "")).lower().strip()
+            infinity_constant = cfg.get("infinity_constant")
+            if has_infinity_strategy and infinity_strategy not in (
+                "mode", "mean", "median", "constant", "leave_unchanged"
+            ):
+                raise ValueError(
+                    f"Invalid infinity_strategy '{infinity_strategy}' for column '{col}'. "
+                    "Supported strategies are: 'mode', 'mean', 'median', 'constant', and 'leave_unchanged'."
+                )
+            if has_infinity_strategy and infinity_strategy == "constant":
+                try:
+                    infinity_constant = float(infinity_constant)
+                except (TypeError, ValueError):
+                    raise ValueError(
+                        f"infinity_constant for column '{col}' must be a finite number."
+                    )
+                if not np.isfinite(infinity_constant):
+                    raise ValueError(
+                        f"infinity_constant for column '{col}' must be a finite number."
+                    )
+
+            # Detect infinities
+            inf_mask = pd.Series(False, index=series.index)
+            if handle_infinities:
+                inf_mask = np.isposinf(series) | np.isneginf(series)
+
+            finite_values = series[np.isfinite(series)]
+            infinity_replacement = None
+            if has_infinity_strategy and infinity_strategy != "leave_unchanged" and inf_mask.any():
+                if finite_values.empty and infinity_strategy != "constant":
+                    raise ValueError(
+                        f"Cannot apply infinity strategy '{infinity_strategy}' to column '{col}': "
+                        "no finite values are available."
+                    )
+                if infinity_strategy == "mode":
+                    value_counts = finite_values.value_counts()
+                    if value_counts.empty or int(value_counts.eq(value_counts.max()).sum()) != 1:
+                        raise ValueError(
+                            f"Cannot apply infinity strategy 'mode' to column '{col}': "
+                            "no unique most frequent finite value exists."
+                        )
+                    infinity_replacement = value_counts.index[0]
+                elif infinity_strategy == "mean":
+                    infinity_replacement = float(finite_values.mean())
+                elif infinity_strategy == "median":
+                    infinity_replacement = float(finite_values.median())
+                elif infinity_strategy == "constant":
+                    infinity_replacement = infinity_constant
+
+                if not np.isfinite(infinity_replacement):
+                    raise ValueError(
+                        f"Infinity strategy '{infinity_strategy}' produced a non-finite value for column '{col}'."
+                    )
+                cleaned_df.loc[inf_mask, col] = infinity_replacement
+                total_invalid_replaced += int(inf_mask.sum())
+                operations_performed.append({
+                    "operation": "replace_infinities",
+                    "column": col,
+                    "affected_rows": int(inf_mask.sum()),
+                    "strategy": infinity_strategy,
+                    "replacement_value": _safe_json_value(infinity_replacement),
+                    "description": (
+                        f"Replaced {int(inf_mask.sum())} infinite value(s) in column '{col}' "
+                        f"using {infinity_strategy}."
+                    ),
+                })
+
+            # Detect range violations (excluding infinities and NaNs)
+            range_mask = pd.Series(False, index=series.index)
+            finite_nums = series.notna() & ~np.isposinf(series) & ~np.isneginf(series)
+            if min_val is not None:
+                range_mask |= (finite_nums & (series < min_val))
+            if max_val is not None:
+                range_mask |= (finite_nums & (series > max_val))
+
+            replace_infinities_with_nan = not has_infinity_strategy
+            col_invalid_mask = (inf_mask if replace_infinities_with_nan else pd.Series(False, index=series.index)) | range_mask
+            inf_count = int(inf_mask.sum())
+            range_count = int(range_mask.sum())
+            total_invalid = int(inf_count + range_count)
+
+            if action in ("replace_with_nan", "replace_with_null") and total_invalid > 0:
+                replace_mask = range_mask | (
+                    inf_mask if replace_infinities_with_nan else pd.Series(False, index=series.index)
+                )
+                values_replaced = int(replace_mask.sum())
+                if values_replaced > 0:
+                    cleaned_df.loc[replace_mask, col] = np.nan
+                    total_invalid_replaced += values_replaced
+                    operations_performed.append({
+                        "operation": "replace_invalid_numerical",
+                        "column": col,
+                        "affected_rows": values_replaced,
+                        "infinities_replaced": inf_count if replace_infinities_with_nan else 0,
+                        "range_violations_replaced": range_count,
+                        "description": (
+                            f"Replaced {values_replaced} invalid numerical value(s) in column '{col}' with NaN "
+                            f"({inf_count if replace_infinities_with_nan else 0} infinities, {range_count} range violations)."
+                        ),
+                    })
+            elif action == "drop_rows" and total_invalid > 0:
+                rows_to_drop_mask |= col_invalid_mask
+
+            invalid_numerical_details.append({
+                "column": col,
+                "action": action,
+                "infinity_strategy": infinity_strategy if has_infinity_strategy else None,
+                "infinity_replacement_value": (
+                    _safe_json_value(infinity_replacement)
+                    if infinity_replacement is not None
+                    else None
+                ),
+                "infinities_detected": inf_count,
+                "range_violations_detected": range_count,
+                "total_invalid_detected": total_invalid,
+                "min_value": min_val,
+                "max_value": max_val,
+            })
+
+        if rows_to_drop_mask.any():
+            dropped_rows_count = int(rows_to_drop_mask.sum())
+            cleaned_df = cleaned_df[~rows_to_drop_mask].reset_index(drop=True)
+            total_invalid_rows_dropped = dropped_rows_count
+            operations_performed.append({
+                "operation": "drop_invalid_numerical_rows",
+                "removed_rows": dropped_rows_count,
+                "description": f"Removed {dropped_rows_count} row(s) containing invalid numerical values.",
             })
 
     # -------------------------------------------------------------
@@ -387,6 +634,16 @@ def clean_dataset(
         "text_formatting": {
             "whitespace_trimmed": trimmed_whitespace_details,
             "casing_applied": casing_applied_details,
+            "value_mappings": value_mapping_details,
+        },
+        "invalid_numerical_values": {
+            "total_values_replaced": total_invalid_replaced,
+            "total_rows_dropped": total_invalid_rows_dropped,
+            "details": invalid_numerical_details,
+        },
+        "value_mapping": {
+            "total_mapped": total_values_mapped,
+            "details": value_mapping_details,
         },
         "columns_dropped": {
             "empty_columns": dropped_empty_columns,

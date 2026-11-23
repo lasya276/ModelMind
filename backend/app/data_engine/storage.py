@@ -242,6 +242,86 @@ def get_dataset(dataset_id: str) -> Tuple[bytes, str]:
     return file_bytes, filename
 
 
+def get_dataset_preview(dataset_id: str, preview_limit: int = 20) -> Dict[str, Any]:
+    """Reads a bounded CSV preview and counts rows without loading the full dataset."""
+    _validate_dataset_id(dataset_id)
+    clean_id = dataset_id.strip()
+    s_dir = get_storage_dir()
+    data_file = s_dir / f"{clean_id}.csv"
+    meta_file = s_dir / f"{clean_id}.json"
+
+    if not data_file.is_file():
+        raise FileNotFoundError(f"Dataset '{clean_id}' was not found in temporary storage.")
+
+    now = time.time()
+    created_at = None
+    if meta_file.is_file():
+        try:
+            created_at = json.loads(meta_file.read_text(encoding="utf-8")).get("created_at")
+        except (OSError, ValueError):
+            pass
+    try:
+        dataset_created_at = float(created_at) if created_at is not None else data_file.stat().st_mtime
+    except (TypeError, ValueError):
+        dataset_created_at = data_file.stat().st_mtime
+    if now - dataset_created_at > EXPIRATION_HOURS * 3600:
+        raise FileNotFoundError(f"Dataset '{clean_id}' has expired and is no longer available.")
+
+    if data_file.stat().st_size == 0:
+        return {
+            "dataset_id": clean_id,
+            "columns": [],
+            "rows": [],
+            "total_rows": 0,
+            "total_columns": 0,
+        }
+
+    try:
+        preview_df = pd.read_csv(data_file, nrows=preview_limit)
+        columns = [str(column) for column in preview_df.columns]
+        preview_rows = [
+            [
+                _preview_value(value)
+                for value in row
+            ]
+            for row in preview_df.itertuples(index=False, name=None)
+        ]
+        total_rows = sum(
+            len(chunk)
+            for chunk in pd.read_csv(data_file, chunksize=10_000)
+        )
+    except pd.errors.EmptyDataError:
+        return {
+            "dataset_id": clean_id,
+            "columns": [],
+            "rows": [],
+            "total_rows": 0,
+            "total_columns": 0,
+        }
+    except (pd.errors.ParserError, UnicodeDecodeError) as err:
+        raise ValueError(f"Unable to preview the stored CSV dataset: {err}") from err
+
+    return {
+        "dataset_id": clean_id,
+        "columns": columns,
+        "rows": preview_rows,
+        "total_rows": total_rows,
+        "total_columns": len(columns),
+    }
+
+
+def _preview_value(value: Any) -> Any:
+    if pd.isna(value):
+        return None
+    if hasattr(value, "item"):
+        value = value.item()
+    if isinstance(value, float) and not pd.notna(value):
+        return None
+    if isinstance(value, float) and value in (float("inf"), float("-inf")):
+        return str(value)
+    return value
+
+
 def get_dataset_metadata(dataset_id: str) -> Dict[str, Any]:
     """
     Retrieves stored dataset metadata.

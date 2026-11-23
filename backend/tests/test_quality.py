@@ -130,7 +130,7 @@ def test_quality_inconsistent_categorical_values():
 def test_quality_invalid_numerical_values():
     """Verify detection of positive and negative infinity values."""
     df = pd.DataFrame({
-        "values": [1.0, np.inf, -np.inf, 2.5, 3.0],
+        "values": [1.0, np.inf, -np.inf, 2.5, 1.0],
         "normal": [10, 20, 30, 40, 50],
     })
     report = check_data_quality(df)
@@ -143,6 +143,22 @@ def test_quality_invalid_numerical_values():
     assert val_report["negative_infinity_count"] == 1
     assert val_report["total_invalid_count"] == 2
     assert val_report["severity"] == "high"
+    assert val_report["finite_value_count"] == 3
+    assert val_report["mode_available"] is True
+    assert val_report["mode_unavailable_reason"] is None
+
+
+def test_quality_reports_when_finite_mode_is_unavailable():
+    df = pd.DataFrame({
+        "tied": [np.inf, -np.inf, 1.0, 2.0],
+        "empty": [np.inf, -np.inf, np.nan, np.nan],
+    })
+    columns = {item["column"]: item for item in check_data_quality(df)["invalid_numerical_values"]["columns"]}
+
+    assert columns["tied"]["mode_available"] is False
+    assert columns["tied"]["mode_unavailable_reason"] == "The most frequent finite values are tied."
+    assert columns["empty"]["finite_value_count"] == 0
+    assert columns["empty"]["mode_unavailable_reason"] == "No finite values are available."
 
 
 def test_quality_empty_dataframe():

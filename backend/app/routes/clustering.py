@@ -101,6 +101,7 @@ async def clustering_endpoint(
     - Feature standardization via StandardScaler.
     - Returns cluster assignments, sizes, centroids (in original feature scale),
       inertia, and silhouette score.
+    - Includes at most 500 row-aligned visualization observations with up to 10 features.
     - Cluster labels are categorical group identifiers and are not automatically
       claimed to represent meaningful real-world categories.
 
@@ -111,7 +112,7 @@ async def clustering_endpoint(
     query parameter, or JSON body.
 
     Returns:
-        JSON response with clustering results and explanations.
+        JSON response with clustering results, bounded visualization data, and explanations.
     """
     # 1. Resolve dataset, original filename, and stored dataset_id
     df, filename, stored_id = await resolve_dataset_from_request(

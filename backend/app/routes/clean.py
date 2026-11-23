@@ -22,6 +22,7 @@ from app.data_engine.storage import (
     resolve_dataset_from_request,
     save_dataset,
     get_dataset,
+    get_dataset_preview,
 )
 
 # Supported top-level cleaning operation keys
@@ -33,6 +34,8 @@ VALID_OPERATION_KEYS = {
     "casing",
     "drop_empty_columns",
     "drop_constant_columns",
+    "invalid_numerical_values",
+    "value_mapping",
 }
 
 # Create an isolated router for cleaning operations
@@ -156,6 +159,23 @@ async def clean_dataset_endpoint(
         "download_url": f"/clean/download/{cleaned_dataset_id}",
         "data": report,
     }
+
+
+@router.get("/clean/preview/{dataset_id}", summary="Preview a cleaned dataset")
+async def preview_cleaned_dataset(dataset_id: str):
+    """Returns the first 20 rows and total dimensions of a stored dataset."""
+    try:
+        return get_dataset_preview(dataset_id, preview_limit=20)
+    except ValueError as err:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(err),
+        )
+    except FileNotFoundError as err:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(err),
+        )
 
 
 @router.get("/clean/download/{dataset_id}", summary="Download a cleaned dataset as CSV")

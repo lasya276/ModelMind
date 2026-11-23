@@ -79,6 +79,8 @@ async def anomaly_detection_endpoint(
     - Purely numeric feature extraction with automatic identifier exclusion.
     - Safe median imputation for missing and infinite values.
     - Outputs row-level anomaly labels (1 for normal, -1 for anomaly) and anomaly scores.
+    - Includes at most 500 row-aligned observation previews and 100 flagged observations,
+      with up to 10 selected feature values per row.
     - Transparently documents detected anomalies as statistical outliers requiring
       investigation, rather than assuming fraud, defects, or errors.
 
@@ -89,7 +91,7 @@ async def anomaly_detection_endpoint(
     query parameter, or JSON body.
 
     Returns:
-        JSON response with anomaly detection results and explanations.
+        JSON response with anomaly detection results, bounded observation previews, and explanations.
     """
     # 1. Resolve dataset, original filename, and stored dataset_id
     df, filename, stored_id = await resolve_dataset_from_request(

@@ -6,6 +6,7 @@ Groups observations into natural clusters using Scikit-learn's K-Means algorithm
 - Feature standardization via StandardScaler.
 - Inverse transformation of cluster centroids to original feature scale.
 - Comprehensive cluster summaries: sizes, assignments, centroids, inertia, and silhouette score.
+- Bounded row-aligned feature/assignment samples for visualization.
 - Guaranteed immutability of input DataFrame.
 - Strict JSON serializability.
 """
@@ -24,6 +25,9 @@ ID_NAME_PATTERN = re.compile(
     r"(^|_|-)(id|uuid|guid|key|code|pk|identifier)($|_|-)",
     re.IGNORECASE,
 )
+
+VISUALIZATION_ROW_LIMIT = 500
+VISUALIZATION_FEATURE_LIMIT = 10
 
 
 class ClusterDict(dict):
@@ -91,7 +95,8 @@ def perform_clustering(
         random_state: Random state for reproducibility.
 
     Returns:
-        Structured, JSON-serializable clustering report dictionary.
+        Structured, JSON-serializable clustering report dictionary. visualization_data
+        contains at most 500 rows and 10 selected feature values per row.
 
     Raises:
         TypeError: If df is not a pandas DataFrame.
@@ -224,6 +229,25 @@ def perform_clustering(
     # Row-level cluster assignments (0 to n_clusters - 1)
     cluster_assignments = [int(lbl) for lbl in raw_labels]
 
+    preview_positions = np.linspace(
+        0,
+        total_rows - 1,
+        num=min(total_rows, VISUALIZATION_ROW_LIMIT),
+        dtype=int,
+    )
+    visualization_features = selected_features[:VISUALIZATION_FEATURE_LIMIT]
+    visualization_rows = [
+        {
+            "row_index": int(position),
+            "cluster": cluster_assignments[position],
+            "features": {
+                feature: float(X.iloc[position][feature])
+                for feature in visualization_features
+            },
+        }
+        for position in preview_positions
+    ]
+
     # Cluster sizes
     cluster_sizes = ClusterDict({
         str(c): int((raw_labels == c).sum())
@@ -295,6 +319,15 @@ def perform_clustering(
         "cluster_sizes": cluster_sizes,
         "centroids": centroids,
         "cluster_assignments": cluster_assignments,
+        "visualization_data": {
+            "total_rows": total_rows,
+            "returned_rows": len(visualization_rows),
+            "truncated": total_rows > len(visualization_rows),
+            "feature_columns": visualization_features,
+            "omitted_feature_count": len(selected_features) - len(visualization_features),
+            "feature_values_are_imputed": True,
+            "rows": visualization_rows,
+        },
         "inertia": inertia,
         "silhouette_score": silhouette_score,
         "silhouette_explanation": silhouette_explanation,

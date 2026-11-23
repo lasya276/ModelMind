@@ -5,6 +5,7 @@ Features:
 - Purely numeric feature extraction with automatic ID exclusion.
 - Safe imputation of missing and infinite values for model fitting.
 - Comprehensive JSON-serializable anomaly report.
+- Bounded previews of original observations aligned with their labels and scores.
 - Guaranteed immutability of input DataFrame.
 """
 
@@ -19,6 +20,10 @@ ID_NAME_PATTERN = re.compile(
     r"(^|_|-)(id|uuid|guid|key|code|pk|identifier)($|_|-)",
     re.IGNORECASE,
 )
+
+VISUALIZATION_ROW_LIMIT = 500
+VISUALIZATION_FEATURE_LIMIT = 10
+FLAGGED_OBSERVATION_LIMIT = 100
 
 
 def _is_potential_id_column(col_name: str, series: pd.Series, total_rows: int) -> bool:
@@ -62,7 +67,9 @@ def detect_anomalies(
         random_state: Random seed for reproducibility.
 
     Returns:
-        Structured, JSON-serializable anomaly detection report.
+        Structured, JSON-serializable anomaly detection report. visualization_data
+        contains at most 500 rows and 10 feature values per row; flagged_observations
+        contains at most 100 flagged rows with the same feature-value bound.
 
     Raises:
         ValueError: If df is None, feature_columns do not exist, or are non-numeric.
@@ -198,6 +205,35 @@ def detect_anomalies(
     anomaly_count = int(sum(1 for p in raw_preds if p == -1))
     normal_count = int(sum(1 for p in raw_preds if p == 1))
     anomaly_pct = round((anomaly_count / total_rows * 100), 2)
+    visualization_features = selected_features[:VISUALIZATION_FEATURE_LIMIT]
+    preview_positions = np.linspace(
+        0,
+        total_rows - 1,
+        num=min(total_rows, VISUALIZATION_ROW_LIMIT),
+        dtype=int,
+    )
+
+    def observation_at(position: int) -> Dict[str, Any]:
+        original_features = {}
+        for feature in visualization_features:
+            value = df.iloc[position][feature]
+            if pd.isna(value) or not np.isfinite(value):
+                original_features[feature] = None
+            else:
+                original_features[feature] = float(value)
+        return {
+            "row_index": int(position),
+            "features": original_features,
+            "label": anomaly_labels[position],
+            "score": anomaly_scores[position],
+            "is_anomaly": is_anomaly[position],
+        }
+
+    visualization_rows = [observation_at(int(position)) for position in preview_positions]
+    flagged_positions = np.flatnonzero(raw_preds == -1)
+    flagged_positions = sorted(flagged_positions, key=lambda position: raw_scores[position])
+    flagged_preview_positions = flagged_positions[:FLAGGED_OBSERVATION_LIMIT]
+    flagged_observations = [observation_at(int(position)) for position in flagged_preview_positions]
 
     explanation = (
         f"Analyzed {total_rows} rows across {len(selected_features)} numeric feature(s) ({', '.join(selected_features)}). "
@@ -216,5 +252,19 @@ def detect_anomalies(
         "anomaly_labels": anomaly_labels,
         "anomaly_scores": anomaly_scores,
         "is_anomaly": is_anomaly,
+        "visualization_data": {
+            "total_rows": total_rows,
+            "returned_rows": len(visualization_rows),
+            "truncated": total_rows > len(visualization_rows),
+            "feature_columns": visualization_features,
+            "omitted_feature_count": len(selected_features) - len(visualization_features),
+            "rows": visualization_rows,
+        },
+        "flagged_observations": {
+            "total_count": anomaly_count,
+            "returned_count": len(flagged_observations),
+            "truncated": anomaly_count > len(flagged_observations),
+            "rows": flagged_observations,
+        },
         "explanation": explanation,
     }

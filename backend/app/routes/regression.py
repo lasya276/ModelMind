@@ -61,6 +61,7 @@ async def regression_endpoint(
     - Supports numeric and categorical features with automatic preprocessing.
     - Prevents data leakage with strict train/test pipeline isolation.
     - Returns MAE, MSE, RMSE, R² for each model, target summary statistics, and model comparison.
+    - Includes at most 500 aligned actual/predicted test rows per model for visualization.
     - Never automatically selects or assumes a target column.
 
     Accepts either:
@@ -70,7 +71,7 @@ async def regression_endpoint(
     form field, query parameter, or JSON body.
 
     Returns:
-        JSON response with regression results for all three models.
+        JSON response with regression results and bounded prediction previews.
     """
     # 1. Resolve dataset, original filename, and stored dataset_id
     df, filename, stored_id = await resolve_dataset_from_request(

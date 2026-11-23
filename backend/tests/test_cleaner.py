@@ -272,3 +272,222 @@ def test_cleaner_invalid_inputs():
 
     with pytest.raises(TypeError, match="must be a pandas DataFrame"):
         clean_dataset("not a dataframe")
+
+
+def test_invalid_numerical_infinities_and_bounds():
+    """Verify detection and replacement of +inf, -inf, and out-of-range bounds with NaN."""
+    df = pd.DataFrame({
+        "vals": [np.inf, -np.inf, -5.0, 50.0, 150.0, 20.0, np.nan],
+    })
+    copy_df = df.copy(deep=True)
+
+    cleaned_df, report = clean_dataset(
+        df,
+        invalid_numerical_values={
+            "vals": {
+                "action": "replace_with_nan",
+                "min_value": 0.0,
+                "max_value": 100.0,
+                "handle_infinities": True,
+            }
+        }
+    )
+
+    # 4 values replaced: +inf, -inf, -5.0 (< 0), 150.0 (> 100)
+    assert cleaned_df["vals"].iloc[3] == 50.0
+    assert cleaned_df["vals"].iloc[5] == 20.0
+    assert np.isnan(cleaned_df["vals"].iloc[0])
+    assert np.isnan(cleaned_df["vals"].iloc[1])
+    assert np.isnan(cleaned_df["vals"].iloc[2])
+    assert np.isnan(cleaned_df["vals"].iloc[4])
+
+    assert report["invalid_numerical_values"]["total_values_replaced"] == 4
+    # Original DataFrame remains completely untouched
+    assert np.isinf(copy_df["vals"].iloc[0])
+    assert copy_df["vals"].iloc[2] == -5.0
+
+
+def test_invalid_numerical_infinity_replacement_strategies_use_finite_values():
+    values = [np.inf, -np.inf, 2.0, 2.0, 8.0, np.nan]
+    df = pd.DataFrame({
+        "mode": values,
+        "mean": values,
+        "median": values,
+        "constant": values,
+        "unchanged": values,
+    })
+    original = df.copy(deep=True)
+
+    cleaned, report = clean_dataset(
+        df,
+        invalid_numerical_values={
+            "mode": {"action": "none", "infinity_strategy": "mode"},
+            "mean": {"action": "none", "infinity_strategy": "mean"},
+            "median": {"action": "none", "infinity_strategy": "median"},
+            "constant": {
+                "action": "none",
+                "infinity_strategy": "constant",
+                "infinity_constant": -7,
+            },
+            "unchanged": {"action": "none", "infinity_strategy": "leave_unchanged"},
+        },
+    )
+
+    assert cleaned["mode"].iloc[:2].tolist() == [2.0, 2.0]
+    assert cleaned["mean"].iloc[:2].tolist() == pytest.approx([4.0, 4.0])
+    assert cleaned["median"].iloc[:2].tolist() == [2.0, 2.0]
+    assert cleaned["constant"].iloc[:2].tolist() == [-7.0, -7.0]
+    assert np.isposinf(cleaned["unchanged"].iloc[0])
+    assert np.isneginf(cleaned["unchanged"].iloc[1])
+    assert report["invalid_numerical_values"]["total_values_replaced"] == 8
+    details = {
+        item["column"]: item
+        for item in report["invalid_numerical_values"]["details"]
+    }
+    assert details["mean"]["infinity_strategy"] == "mean"
+    assert details["mean"]["infinity_replacement_value"] == pytest.approx(4.0)
+    pd.testing.assert_frame_equal(df, original)
+
+
+def test_invalid_numerical_infinity_mode_requires_unique_finite_mode():
+    tied = pd.DataFrame({"value": [np.inf, -np.inf, 2.0, 4.0]})
+    with pytest.raises(ValueError, match="no unique most frequent finite value"):
+        clean_dataset(
+            tied,
+            invalid_numerical_values={
+                "value": {"infinity_strategy": "mode", "action": "none"}
+            },
+        )
+
+    no_finite_values = pd.DataFrame({"value": [np.inf, -np.inf]})
+    with pytest.raises(ValueError, match="no finite values are available"):
+        clean_dataset(
+            no_finite_values,
+            invalid_numerical_values={
+                "value": {"infinity_strategy": "median", "action": "none"}
+            },
+        )
+
+
+def test_invalid_numerical_min_only_and_max_only():
+    """Verify min-only and max-only boundary configurations."""
+    df = pd.DataFrame({
+        "age": [-2, 10, 25, 40],
+        "score": [50, 75, 120, 80],
+    })
+
+    cleaned_df, report = clean_dataset(
+        df,
+        invalid_numerical_values={
+            "age": {"action": "replace_with_nan", "min_value": 0},
+            "score": {"action": "replace_with_nan", "max_value": 100},
+        }
+    )
+
+    assert np.isnan(cleaned_df["age"].iloc[0])
+    assert cleaned_df["age"].iloc[1] == 10
+    assert np.isnan(cleaned_df["score"].iloc[2])
+    assert cleaned_df["score"].iloc[3] == 80
+
+
+def test_invalid_numerical_drop_rows():
+    """Verify explicit removal of rows containing invalid numerical values."""
+    df = pd.DataFrame({
+        "id": [1, 2, 3, 4],
+        "speed": [50.0, np.inf, 80.0, -10.0],
+    })
+
+    cleaned_df, report = clean_dataset(
+        df,
+        invalid_numerical_values={
+            "speed": {"action": "drop_rows", "min_value": 0.0, "handle_infinities": True}
+        }
+    )
+
+    assert len(cleaned_df) == 2
+    assert list(cleaned_df["id"]) == [1, 3]
+    assert report["invalid_numerical_values"]["total_rows_dropped"] == 2
+
+
+def test_invalid_numerical_replace_followed_by_impute():
+    """Verify that values replaced with NaN can subsequently be imputed in the same run."""
+    df = pd.DataFrame({
+        "metric": [-100.0, 10.0, 20.0, 30.0],
+    })
+
+    cleaned_df, report = clean_dataset(
+        df,
+        invalid_numerical_values={
+            "metric": {"action": "replace_with_nan", "min_value": 0.0}
+        },
+        missing_values={
+            "metric": "mean"
+        }
+    )
+
+    # -100 became NaN, then [NaN, 10, 20, 30] imputed with mean = 20.0
+    assert cleaned_df["metric"].iloc[0] == 20.0
+    assert cleaned_df["metric"].isna().sum() == 0
+
+
+def test_invalid_numerical_validation_errors():
+    """Verify validation when min_value > max_value or non-numeric column is passed."""
+    df = pd.DataFrame({"num": [1, 2], "text": ["a", "b"]})
+
+    with pytest.raises(ValueError, match="cannot be greater than max_value"):
+        clean_dataset(
+            df,
+            invalid_numerical_values={"num": {"min_value": 100, "max_value": 50}}
+        )
+
+    with pytest.raises(ValueError, match="non-numeric column"):
+        clean_dataset(
+            df,
+            invalid_numerical_values={"text": {"min_value": 0}}
+        )
+
+
+def test_value_mapping_simultaneous_and_null_safe():
+    """Verify categorical value mapping with simultaneous swaps and null preservation."""
+    df = pd.DataFrame({
+        "country": ["india", "INDIA", "Indai", "USA", np.nan],
+        "status": ["A", "B", "C", "A", "B"],
+    })
+    copy_df = df.copy(deep=True)
+
+    cleaned_df, report = clean_dataset(
+        df,
+        value_mapping={
+            "country": {
+                "india": "India",
+                "INDIA": "India",
+                "Indai": "India",
+            },
+            # Simultaneous swap without cascading
+            "status": {
+                "A": "B",
+                "B": "A",
+            }
+        }
+    )
+
+    assert list(cleaned_df["country"].iloc[:4]) == ["India", "India", "India", "USA"]
+    assert pd.isna(cleaned_df["country"].iloc[4]) # Null preserved!
+    assert list(cleaned_df["status"]) == ["B", "A", "C", "B", "A"]
+    assert report["value_mapping"]["total_mapped"] == 7
+
+    # Original DataFrame unmodified
+    assert copy_df["country"].iloc[0] == "india"
+    assert copy_df["status"].iloc[0] == "A"
+
+
+def test_value_mapping_validation_errors():
+    """Verify validation on invalid column or non-dict mapping."""
+    df = pd.DataFrame({"num": [1, 2], "cat": ["x", "y"]})
+
+    with pytest.raises(ValueError, match="non-text column"):
+        clean_dataset(df, value_mapping={"num": {1: 10}})
+
+    with pytest.raises(ValueError, match="must be a dictionary"):
+        clean_dataset(df, value_mapping={"cat": "not a dict"})
+

@@ -51,6 +51,57 @@ def test_basic_clustering():
     assert "not claimed to be automatically optimal" in res["explanation"]
 
 
+def test_visualization_rows_align_with_source_features_and_assignments():
+    df = _create_synthetic_clusters(20)
+    result = perform_clustering(df, n_clusters=3, feature_columns=["x", "y"])
+
+    preview = result["visualization_data"]
+    assert preview["total_rows"] == len(df)
+    assert preview["returned_rows"] == len(df)
+    assert preview["truncated"] is False
+    assert preview["feature_columns"] == ["x", "y"]
+    for row in preview["rows"]:
+        source = df.iloc[row["row_index"]]
+        assert row["features"]["x"] == source["x"]
+        assert row["features"]["y"] == source["y"]
+        assert row["cluster"] == result["cluster_assignments"][row["row_index"]]
+
+
+def test_visualization_rows_and_features_are_bounded():
+    df = pd.DataFrame({
+        "x": np.arange(600, dtype=float),
+        "y": np.arange(600, dtype=float) ** 2,
+        "z": np.arange(600, dtype=float) ** 3,
+    })
+    result = perform_clustering(
+        df,
+        n_clusters=3,
+        feature_columns=["x", "y", "z"],
+    )
+
+    preview = result["visualization_data"]
+    assert preview["returned_rows"] == 500
+    assert preview["truncated"] is True
+    assert all(len(row["features"]) == 3 for row in preview["rows"])
+
+
+def test_visualization_feature_values_are_bounded():
+    df = pd.DataFrame({
+        f"feature_{column}": np.arange(60, dtype=float) * (column + 1)
+        for column in range(12)
+    })
+    result = perform_clustering(
+        df,
+        n_clusters=3,
+        feature_columns=list(df.columns),
+    )
+
+    preview = result["visualization_data"]
+    assert preview["feature_columns"] == list(df.columns[:10])
+    assert preview["omitted_feature_count"] == 2
+    assert all(len(row["features"]) == 10 for row in preview["rows"])
+
+
 # 2. User-selected numerical features
 def test_user_selected_numerical_features():
     """Verify clustering using only specified numerical feature columns."""

@@ -56,6 +56,10 @@ def test_regression_successful_direct_upload():
         assert "mse" in model
         assert "rmse" in model
         assert "r2_score" in model
+        preview = data["predictions_preview"][model_key]
+        assert preview["returned_rows"] == data["test_rows"]
+        assert len(preview["row_indices"]) == len(preview["actual_values"])
+        assert len(preview["actual_values"]) == len(preview["predicted_values"])
 
     # Verify best model
     assert data["best_model"]["model_key"] in ["linear_regression", "decision_tree", "random_forest"]

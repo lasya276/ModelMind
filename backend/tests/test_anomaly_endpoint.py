@@ -45,6 +45,9 @@ def test_anomaly_successful_direct_upload():
     assert len(data["anomaly_labels"]) == 32
     assert len(data["anomaly_scores"]) == 32
     assert len(data["is_anomaly"]) == 32
+    assert data["visualization_data"]["returned_rows"] == 32
+    assert data["flagged_observations"]["total_count"] == data["anomaly_count"]
+    assert all(row["is_anomaly"] for row in data["flagged_observations"]["rows"])
     assert "x" in data["features_used"]
     assert "y" in data["features_used"]
     assert "label" not in data["features_used"]  # Non-numeric text excluded

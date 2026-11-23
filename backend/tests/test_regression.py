@@ -244,6 +244,29 @@ def test_same_train_test_split_across_models():
     expected_test_rows = res["test_rows"]
     assert expected_test_rows > 0
     assert res["train_rows"] + expected_test_rows == 50
+    assert len({
+        tuple(preview["row_indices"])
+        for preview in res["predictions_preview"].values()
+    }) == 1
+
+
+def test_prediction_preview_values_align_with_source_rows_and_are_bounded():
+    df = _create_deterministic_regression_dataset(1200)
+    result = train_regression_model(df, target_column="target", test_size=0.5)
+
+    previews = result["predictions_preview"]
+    assert set(previews) == {"linear_regression", "decision_tree", "random_forest"}
+    for preview in previews.values():
+        assert preview["returned_rows"] == 500
+        assert preview["total_rows"] == result["test_rows"]
+        assert preview["truncated"] is True
+        assert len(preview["row_indices"]) == 500
+        assert len(preview["actual_values"]) == 500
+        assert len(preview["predicted_values"]) == 500
+        assert preview["actual_values"] == [
+            float(df.iloc[row_index]["target"])
+            for row_index in preview["row_indices"]
+        ]
 
 
 # 19. No target leakage
