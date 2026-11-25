@@ -19,6 +19,29 @@ Instead of manually inspecting and fixing datasets, ModelMind brings data profil
 - **Exploratory Data Analysis** – Helps users understand distributions, relationships, and patterns within their datasets.
 - **Data Preservation** – Keeps the original dataset intact while generating a separate cleaned dataset.
 
+---
+
+## Application Screenshots
+
+### Home Page
+<img width="959" height="495" alt="image" src="https://github.com/user-attachments/assets/8b64923e-0c09-48b3-be04-e6852f61d3f3" />
+
+### Upload Page
+<img width="959" height="494" alt="image" src="https://github.com/user-attachments/assets/cb1de03e-26dd-4dc9-9216-49fcc7f05626" />
+
+### Dataset Page
+<img width="959" height="494" alt="image" src="https://github.com/user-attachments/assets/c8ccd818-0789-4481-b635-e5ecca6620f8" />
+
+### Analysis page
+<img width="1280" height="716" alt="WhatsApp Image 2026-11-26 at 1 11 26 AM" src="https://github.com/user-attachments/assets/619dbd25-43e4-4f99-91f4-af8e20b8bdef" />
+
+### Experiments page
+<img width="959" height="499" alt="image" src="https://github.com/user-attachments/assets/3aecd136-36ba-4f9a-ad77-71e22c27577f" />
+
+### Reports Page
+<img width="959" height="500" alt="image" src="https://github.com/user-attachments/assets/aee2fb51-6026-43ae-a6e0-8c40497bc879" />
+
+
 ## ⚙️ How It Works
 
 1. **Upload** – Import a CSV dataset.
